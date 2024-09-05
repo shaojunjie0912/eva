@@ -1,0 +1,6 @@
+# --------- xmake 相关 ---------
+.cache/
+.xmake/
+build/
+compile_commands.json
+
