@@ -55,7 +55,31 @@ public:
         }
     }
 
-    // static LogLevel::Level FromString
+    static LogLevel::Level FromString(std::string const& str) {
+#define XX(level, v)                   \
+    if (str == #v) {                   \
+        return LogLevel::Level::level; \
+    }
+        XX(FATAL, fatal)
+        XX(ALERT, alert)
+        XX(CRIT, crit)
+        XX(ERROR, error)
+        XX(WARN, warn)
+        XX(NOTICE, notice)
+        XX(INFO, info)
+        XX(DEBUG, debug)
+
+        XX(FATAL, FATAL)
+        XX(ALERT, ALERT)
+        XX(CRIT, CRIT)
+        XX(ERROR, ERROR)
+        XX(WARN, WARN)
+        XX(NOTICE, NOTICE)
+        XX(INFO, INFO)
+        XX(DEBUG, DEBUG)
+#undef XX
+        return LogLevel::Level::NOTSET;
+    }
 };
 
 // 日志事件
@@ -72,7 +96,7 @@ public:
     // Get 方法
     LogLevel::Level GetLevel() const { return level_; }
 
-    std::string GetContent() const { return content_; }
+    std::string GetContent() const { return content_.str(); }
 
     char const* GetFile() const { return file_; }
 
@@ -93,13 +117,13 @@ public:
 private:
     // 内存对齐
     LogLevel::Level level_;      // 日志级别
+    std::stringstream content_;  // 日志内容(占用内存好大392字节)
     const char* file_{nullptr};  // 文件名
     int32_t line_{0};            // 行号
     uint32_t elapse_{0};         // 程序启动开始到现在的毫秒数
     uint32_t thread_id_{0};      // 线程 id
     uint32_t fiber_id_{0};       // 协程 id
     time_t time_{0};             // 时间戳
-    std::string content_;        // 日志内容
     std::string thread_name_;    // 线程名称
     std::string logger_name_;    // 日志器名称
 };
@@ -108,29 +132,185 @@ private:
 class LogFormatter {
 public:
     using ptr = std::shared_ptr<LogFormatter>;
+    /**
+     * @brief 构造函数
+     * @param[in] pattern 格式模板，参考sylar与log4cpp
+     * @details 模板参数说明：
+     * - %%m 消息
+     * - %%p 日志级别
+     * - %%c 日志器名称
+     * - %%d 日期时间，后面可跟一对括号指定时间格式，比如%%d{%%Y-%%m-%%d
+     * %%H:%%M:%%S}，这里的格式字符与C语言strftime一致
+     * - %%r 该日志器创建后的累计运行毫秒数
+     * - %%f 文件名
+     * - %%l 行号
+     * - %%t 线程id
+     * - %%F 协程id
+     * - %%N 线程名称
+     * - %%% 百分号
+     * - %%T 制表符
+     * - %%n 换行
+     *
+     * 默认格式：%%d{%%Y-%%m-%%d %%H:%%M:%%S}%%T%%t%%T%%N%%T%%F%%T[%%p]%%T[%%c]%%T%%f:%%l%%T%%m%%n
+     *
+     * 默认格式描述：年-月-日 时:分:秒 [累计运行毫秒数] \\t 线程id \\t 线程名称 \\t 协程id \\t
+     * [日志级别] \\t [日志器名称] \\t 文件名:行号 \\t 日志消息 换行符
+     */
     LogFormatter(std::string const& pattern =
                      "%d{%Y-%m-%d %H:%M:%S} [%rms]%T%t%T%N%T%F%T[%p]%T[%c]%T%f:%l%T%m%n");
 
 public:
-    std::string Format(LogEvent::ptr event);
+    /**
+     * @brief 初始化，解析格式模板，提取模板项
+     */
     void Init();
 
+    /**
+     * @brief 对日志事件进行格式化，返回格式化日志文本
+     * @param[in] event 日志事件
+     * @return 格式化日志字符串
+     */
+    std::string Format(LogEvent::ptr event);
+
+    /**
+     * @brief 对日志事件进行格式化，返回格式化日志流
+     * @param[in] event 日志事件
+     * @param[in] os 日志输出流
+     * @return 格式化日志流
+     */
+    std::ostream& Format(std::ostream& os, LogEvent::ptr event);
+
+public:
+    /**
+     * @brief 日志内容格式化项，虚基类，用于派生出不同的格式化项
+     */
     class FormatItem {
     public:
         using ptr = std::shared_ptr<FormatItem>;
         virtual ~FormatItem() {}
 
     public:
+        /**
+         * @brief 格式化日志事件
+         */
         virtual void Format(std::ostream& os, LogEvent::ptr event) = 0;
     };
 
 private:
-    std::string pattern_;
-    std::vector<FormatItem::ptr> items_;
-    bool error_;
+    std::string pattern_;                 // 日志格式模板
+    std::vector<FormatItem::ptr> items_;  // 解析后的格式模板数组
+    bool error_;                          // 是否出错
 };
 
-// ------------------- 各种各样的 FormatItem -------------------
+// 日志输出地(纯虚基类)
+class LogAppender {
+public:
+    using ptr = std::shared_ptr<LogAppender>;
+
+    /**
+     * @brief 构造函数
+     * @param[in] default_formatter 默认日志格式器
+     */
+    LogAppender(LogFormatter::ptr default_formatter);
+
+    virtual ~LogAppender() {}
+
+public:
+    /**
+     * @brief 写入日志
+     */
+    virtual void Log(LogEvent::ptr event) = 0;
+
+public:
+    /**
+     * @brief 获取日志格式器
+     */
+    LogFormatter::ptr GetFormatter() const {
+        // 这里需要加锁？
+        return formatter_ ? formatter_ : default_formatter_;
+    }
+
+    /**
+     * @brief 设置日志格式器
+     */
+    void SetFormatter(LogFormatter::ptr formatter) {
+        // 这里需要加锁？
+        formatter_ = formatter;
+    };
+
+protected:
+    // LogLevel::Level level_;
+    std::mutex mtx_;
+    LogFormatter::ptr formatter_;          // 日志格式器
+    LogFormatter::ptr default_formatter_;  // 默认日志格式器
+};
+
+/**
+ * 日志器
+ *
+ * 一个Logger包含多个LogAppender和一个日志级别，提供log方法，传入日志事件，
+ * 判断该日志事件的级别高于日志器本身的级别之后调用LogAppender将日志进行输出，否则该日志被抛弃。
+ *
+ */
+class Logger {
+public:
+    using ptr = std::shared_ptr<Logger>;
+    Logger(std::string const& name = "rooot");
+
+public:
+    void Log(LogLevel::Level level, LogEvent::ptr event);
+
+public:
+    void Debug(LogEvent::ptr event);
+    void Info(LogEvent::ptr event);
+    void Warn(LogEvent::ptr event);
+    void Error(LogEvent::ptr event);
+    void Fatal(LogEvent::ptr event);
+
+public:
+    void AddAppender(LogAppender::ptr appender);
+    void DelAppender(LogAppender::ptr appender);
+
+public:
+    LogLevel::Level GetLevel() const { return level_; };
+
+    void SetLevel(LogLevel::Level level) { level_ = level; };
+
+private:
+    std::string name_;                       // 日志名称
+    LogLevel::Level level_;                  // 日志级别
+    std::list<LogAppender::ptr> appenders_;  // Appender 集合（链表）
+};
+
+// ------------------- 继承自 LogAppender -------------------
+
+// 日志输出：标准输出
+class StdoutLogAppender : public LogAppender {
+public:
+    using ptr = std::shared_ptr<StdoutLogAppender>;
+    StdoutLogAppender() : LogAppender(LogFormatter::ptr{new LogFormatter}) {}
+
+public:
+    void Log(LogEvent::ptr event) override;
+};
+
+// 日志输出：文件
+class FileLogAppender : public LogAppender {
+public:
+    using ptr = std::shared_ptr<FileLogAppender>;
+    FileLogAppender(std::string const& filename);
+
+public:
+    void Log(LogEvent::ptr event) override;
+    bool Reopen();
+
+private:
+    std::string filename_;
+    std::ofstream filestream_;
+};
+
+// ------------------- 继承自 LogFormatter::FormatItem -------------------
+
 class MessageFormatItem : public LogFormatter::FormatItem {
 public:
     MessageFormatItem(const std::string& str) {}
@@ -235,107 +415,6 @@ class PercentSignFormatItem : public LogFormatter::FormatItem {
 public:
     PercentSignFormatItem(const std::string& str) {}
     void Format(std::ostream& os, LogEvent::ptr event) override { os << "%"; }
-};
-// ------------------- 各种各样的 FormatItem -------------------
-
-// 日志输出地(纯虚基类)
-class LogAppender {
-public:
-    using ptr = std::shared_ptr<LogAppender>;
-
-    /**
-     * @brief 构造函数
-     * @param[in] default_formatter 默认日志格式器
-     */
-    LogAppender(LogFormatter::ptr default_formatter);
-
-    virtual ~LogAppender() {}
-
-public:
-    /**
-     * @brief 写入日志
-     */
-    virtual void Log(LogEvent::ptr event) = 0;
-
-public:
-    /**
-     * @brief 获取日志格式器
-     */
-
-    LogFormatter::ptr GetFormatter() const { return formatter_; }
-
-    /**
-     * @brief 设置日志格式器
-     */
-    void SetFormatter(LogFormatter::ptr formatter) { formatter_ = formatter; };
-
-protected:
-    // LogLevel::Level level_;
-    std::mutex mtx_;
-    LogFormatter::ptr formatter_;          // 日志格式器
-    LogFormatter::ptr default_formatter_;  // 默认日志格式器
-};
-
-// 日志输出：标准输出
-class StdoutLogAppender : public LogAppender {
-public:
-    using ptr = std::shared_ptr<StdoutLogAppender>;
-    StdoutLogAppender() : LogAppender(LogFormatter::ptr{new LogFormatter}) {}
-
-public:
-    void Log(LogEvent::ptr event) override;
-};
-
-// 日志输出：文件
-class FileLogAppender : public LogAppender {
-public:
-    using ptr = std::shared_ptr<FileLogAppender>;
-    FileLogAppender(std::string const& filename);
-
-public:
-    void Log(LogEvent::ptr event) override;
-    bool Reopen();
-
-private:
-    std::string filename_;
-    std::ofstream filestream_;
-};
-
-/**
- * 日志器
- *
- * 一个Logger包含多个LogAppender和一个日志级别，提供log方法，传入日志事件，
- * 判断该日志事件的级别高于日志器本身的级别之后调用LogAppender将日志进行输出，否则该日志被抛弃。
- *
- */
-class Logger {
-public:
-    using ptr = std::shared_ptr<Logger>;
-    Logger(std::string const& name = "rooot");
-
-public:
-    void Log(LogLevel::Level level, LogEvent::ptr event);
-
-public:
-    void Debug(LogEvent::ptr event);
-    void Info(LogEvent::ptr event);
-    void Warn(LogEvent::ptr event);
-    void Error(LogEvent::ptr event);
-    void Fatal(LogEvent::ptr event);
-
-public:
-    void AddAppender(LogAppender::ptr appender);
-    void DelAppender(LogAppender::ptr appender);
-
-public:
-    LogLevel::Level GetLevel() const { return level_; };
-
-    void SetLevel(LogLevel::Level level) { level_ = level; };
-
-private:
-    std::string name_;                       // 日志名称
-    LogLevel::Level level_;                  // 日志级别
-    std::list<LogAppender::ptr> appenders_;  // Appender 集合（链表）
 };
 
 };  // namespace eva

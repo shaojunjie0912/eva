@@ -16,63 +16,9 @@ LogEvent::LogEvent(const std::string& logger_name, LogLevel::Level level, const 
       thread_name_(thread_name),
       logger_name_(logger_name) {}
 
-// ---------------- Logger 类 ----------------
-
-void Logger::AddAppender(LogAppender::ptr appender) { appenders_.push_back(appender); }
-
-void Logger::DelAppender(LogAppender::ptr appender) {
-    if (auto it{std::find(appenders_.begin(), appenders_.end(), appender)};
-        it != appenders_.end()) {
-        appenders_.erase(it);
-    }
-}
-void Logger::Log(LogLevel::Level level, LogEvent::ptr event) {
-    if (level >= level_) {
-        for (auto const& appender : appenders_) {
-            appender->Log(level, event);
-        }
-    }
-}
-
-void Logger::Debug(LogEvent::ptr event) { Log(LogLevel::Level::DEBUG, event); }
-void Logger::Info(LogEvent::ptr event) { Log(LogLevel::Level::INFO, event); }
-void Logger::Warn(LogEvent::ptr event) { Log(LogLevel::Level::WARN, event); }
-void Logger::Error(LogEvent::ptr event) { Log(LogLevel::Level::ERROR, event); }
-void Logger::Fatal(LogEvent::ptr event) { Log(LogLevel::Level::FATAL, event); }
-
-// ---------------- StdoutLogAppender 类 ----------------
-void StdoutLogAppender::Log(LogLevel::Level level, LogEvent::ptr event) {
-    if (level >= level_) {
-        std::cout << formatter_->Format(event);
-    }
-}
-
-// ---------------- FileLogAppender 类 ----------------
-void FileLogAppender::Log(LogLevel::Level level, LogEvent::ptr event) {
-    if (level >= level_) {
-        filestream_ << formatter_->Format(event);
-    }
-}
-
-bool FileLogAppender::Reopen() {
-    if (filestream_) {
-        filestream_.close();
-    }
-    filestream_.open(filename_);
-    return !!filestream_;
-}
-
 // ---------------- LogFormatter 类 ----------------
 
 LogFormatter::LogFormatter(std::string const& pattern) : pattern_(pattern) { Init(); }
-
-std::string LogFormatter::Format(LogEvent::ptr event) {
-    std::stringstream ss;
-    for (auto const& item : items_) {
-        item->Format(ss, event);
-    }
-    return ss.str();
-}
 
 void LogFormatter::Init() {
     // 按顺序存储解析到的pattern项
@@ -154,13 +100,6 @@ void LogFormatter::Init() {
         tmp.clear();
     }
 
-    // for debug
-    // std::cout << "patterns:" << std::endl;
-    // for(auto &v : patterns) {
-    //     std::cout << "type = " << v.first << ", value = " << v.second << std::endl;
-    // }
-    // std::cout << "dataformat = " << dateformat << std::endl;
-
     static std::map<std::string, std::function<FormatItem::ptr(std::string const& str)>>
         s_format_items = {
 #define XX(str, C) {#str, [](std::string const& fmt) { return FormatItem::ptr(new C(fmt)); }}
@@ -202,6 +141,67 @@ void LogFormatter::Init() {
         error_ = true;
         return;
     }
+}
+
+std::string LogFormatter::Format(LogEvent::ptr event) {
+    std::stringstream ss;
+    for (auto const& item : items_) {
+        item->Format(ss, event);
+    }
+    return ss.str();
+}
+
+std::ostream& LogFormatter::Format(std::ostream& os, LogEvent::ptr event) {
+    for (auto const& item : items_) {
+        item->Format(os, event);
+    }
+    return os;
+}
+
+// ---------------- Logger 类 ----------------
+
+void Logger::AddAppender(LogAppender::ptr appender) { appenders_.push_back(appender); }
+
+void Logger::DelAppender(LogAppender::ptr appender) {
+    if (auto it{std::find(appenders_.begin(), appenders_.end(), appender)};
+        it != appenders_.end()) {
+        appenders_.erase(it);
+    }
+}
+void Logger::Log(LogLevel::Level level, LogEvent::ptr event) {
+    if (level >= level_) {
+        for (auto const& appender : appenders_) {
+            appender->Log(level, event);
+        }
+    }
+}
+
+void Logger::Debug(LogEvent::ptr event) { Log(LogLevel::Level::DEBUG, event); }
+void Logger::Info(LogEvent::ptr event) { Log(LogLevel::Level::INFO, event); }
+void Logger::Warn(LogEvent::ptr event) { Log(LogLevel::Level::WARN, event); }
+void Logger::Error(LogEvent::ptr event) { Log(LogLevel::Level::ERROR, event); }
+void Logger::Fatal(LogEvent::ptr event) { Log(LogLevel::Level::FATAL, event); }
+
+// ---------------- StdoutLogAppender 类 ----------------
+void StdoutLogAppender::Log(LogLevel::Level level, LogEvent::ptr event) {
+    if (level >= level_) {
+        std::cout << formatter_->Format(event);
+    }
+}
+
+// ---------------- FileLogAppender 类 ----------------
+void FileLogAppender::Log(LogLevel::Level level, LogEvent::ptr event) {
+    if (level >= level_) {
+        filestream_ << formatter_->Format(event);
+    }
+}
+
+bool FileLogAppender::Reopen() {
+    if (filestream_) {
+        filestream_.close();
+    }
+    filestream_.open(filename_);
+    return !!filestream_;
 }
 
 LogAppender::LogAppender(LogFormatter::ptr default_formatter)
