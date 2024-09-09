@@ -15,9 +15,42 @@
 #include <utility>
 #include <vector>
 
-// 在想要不要把跟时间相关的都转为 chrono?, 目前是 ctime
+// 在想要不要把跟时间相关的头文件转为 chrono?, 目前是 ctime，用起来也挺好
+// 哪怕用chrono估计还是得转ctime
 
 // 为什么新版在 LogAppender.Log 中删除了 LogLevel::Level level
+// 貌似很多函数都删除了这个 level 形参
+
+/**
+ * @brief 使用流式方式将日志级别level的日志写入到logger
+ * @details 构造一个LogEventWrap对象，包裹包含日志器和日志事件，在对象析构时调用日志器写日志事件
+ * TODO: 协程id未实现，暂时写0
+ */
+#define EVA_LOG_LEVEL(logger, level)                                                         \
+    if (logger->GetLevel() >= level)                                                         \
+    eva::LogEventWrap{logger,                                                                \
+                      eva::LogEvent::ptr{new eva::LogEvent{                                  \
+                          logger->GetName(), level, __FILE__, __LINE__,                      \
+                          eva::GetElapsedMS() - logger->GetCreateTime(), eva::GetThreadId(), \
+                          eva::GetFiberId(), time(0), eva::GetThreadName()}}}                \
+        .GetLogEvent()                                                                       \
+        ->GetSs()
+
+#define EVA_LOG_FATAL(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::FATAL)
+
+#define EVA_LOG_ALERT(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::ALERT)
+
+#define EVA_LOG_CRIT(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::CRIT)
+
+#define EVA_LOG_ERROR(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::ERROR)
+
+#define EVA_LOG_WARN(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::WARN)
+
+#define EVA_LOG_NOTICE(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::NOTICE)
+
+#define EVA_LOG_INFO(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::INFO)
+
+#define EVA_LOG_DEBUG(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::DEBUG)
 
 namespace eva {
 
@@ -89,14 +122,17 @@ public:
 
 public:
     LogEvent(const std::string& logger_name, LogLevel::Level level, const char* file, int32_t line,
-             int64_t elapse, uint32_t thread_id, uint64_t fiber_id, time_t time,
+             int64_t elapse, uint32_t thread_id, uint64_t fiber_id, uint64_t time,
              const std::string& thread_name);
 
 public:
     // Get 方法
     LogLevel::Level GetLevel() const { return level_; }
 
-    std::string GetContent() const { return content_.str(); }
+    std::string GetContent() const { return ss_.str(); }
+
+    // WARN: 返回引用不能加 const
+    std::stringstream& GetSs() { return ss_; }
 
     char const* GetFile() const { return file_; }
 
@@ -108,7 +144,7 @@ public:
 
     uint32_t GetFiberId() const { return fiber_id_; }
 
-    time_t GetTime() const { return time_; }
+    uint64_t GetTime() const { return time_; }
 
     std::string GetThreadName() const { return thread_name_; }
 
@@ -117,13 +153,13 @@ public:
 private:
     // 内存对齐
     LogLevel::Level level_;      // 日志级别
-    std::stringstream content_;  // 日志内容(占用内存好大392字节)
+    std::stringstream ss_;       // 日志内容(流式写入日志)
     const char* file_{nullptr};  // 文件名
     int32_t line_{0};            // 行号
     uint32_t elapse_{0};         // 程序启动开始到现在的毫秒数
     uint32_t thread_id_{0};      // 线程 id
     uint32_t fiber_id_{0};       // 协程 id
-    time_t time_{0};             // 时间戳
+    uint64_t time_{0};           // 时间戳
     std::string thread_name_;    // 线程名称
     std::string logger_name_;    // 日志器名称
 };
@@ -134,7 +170,7 @@ public:
     using ptr = std::shared_ptr<LogFormatter>;
     /**
      * @brief 构造函数
-     * @param[in] pattern 格式模板，参考sylar与log4cpp
+     * @param[in] pattern 格式模板，参考eva与log4cpp
      * @details 模板参数说明：
      * - %%m 消息
      * - %%p 日志级别
@@ -239,7 +275,6 @@ public:
     };
 
 protected:
-    // LogLevel::Level level_;
     std::mutex mtx_;
     LogFormatter::ptr formatter_;          // 日志格式器
     LogFormatter::ptr default_formatter_;  // 默认日志格式器
@@ -255,31 +290,74 @@ protected:
 class Logger {
 public:
     using ptr = std::shared_ptr<Logger>;
-    Logger(std::string const& name = "rooot");
+    Logger(std::string const& name = "default");
 
 public:
-    void Log(LogLevel::Level level, LogEvent::ptr event);
-
-public:
-    void Debug(LogEvent::ptr event);
-    void Info(LogEvent::ptr event);
-    void Warn(LogEvent::ptr event);
-    void Error(LogEvent::ptr event);
-    void Fatal(LogEvent::ptr event);
+    void Log(LogEvent::ptr event);
 
 public:
     void AddAppender(LogAppender::ptr appender);
+
     void DelAppender(LogAppender::ptr appender);
 
+    void ClearAppenders();
+
 public:
+    std::string GetName() const { return name_; }
+
+    uint64_t GetCreateTime() const { return create_time_; }
+
     LogLevel::Level GetLevel() const { return level_; };
 
     void SetLevel(LogLevel::Level level) { level_ = level; };
 
 private:
-    std::string name_;                       // 日志名称
-    LogLevel::Level level_;                  // 日志级别
+    std::mutex mtx_;
+    std::string name_;                       // 日志器名称
+    LogLevel::Level level_;                  // 日志器级别
     std::list<LogAppender::ptr> appenders_;  // Appender 集合（链表）
+    uint64_t create_time_;                   // 创建时间(毫秒)
+};
+
+/**
+ * @brief 日志事件包装器，方便宏定义，内部包含日志事件和日志器
+ */
+class LogEventWrap {
+public:
+    /**
+     * @brief 构造函数
+     * @param[in] logger 日志器
+     * @param[in] event 日志事件
+     */
+    LogEventWrap(Logger::ptr logger, LogEvent::ptr event);
+
+    /**
+     * @brief 析构函数
+     * @details 日志事件在析构时由日志器进行输出
+     */
+    ~LogEventWrap();
+
+public:
+    LogEvent::ptr GetLogEvent() const { return event_; }
+
+private:
+    Logger::ptr logger_;   // 日志器
+    LogEvent::ptr event_;  // 日志事件
+};
+
+class LoggerManager {
+public:
+    LoggerManager();
+
+public:
+    void Init();
+    Logger::ptr GetLogger(std::string const& name);
+    Logger::ptr GetRoot() { return root_; }
+
+private:
+    std::mutex mtx_;
+    std::map<std::string, Logger::ptr> loggers_;  // 日志器集合
+    Logger::ptr root_;                            // root 日志器
 };
 
 // ------------------- 继承自 LogAppender -------------------
@@ -288,7 +366,8 @@ private:
 class StdoutLogAppender : public LogAppender {
 public:
     using ptr = std::shared_ptr<StdoutLogAppender>;
-    StdoutLogAppender() : LogAppender(LogFormatter::ptr{new LogFormatter}) {}
+
+    StdoutLogAppender();
 
 public:
     void Log(LogEvent::ptr event) override;
@@ -298,6 +377,7 @@ public:
 class FileLogAppender : public LogAppender {
 public:
     using ptr = std::shared_ptr<FileLogAppender>;
+
     FileLogAppender(std::string const& filename);
 
 public:
@@ -305,8 +385,10 @@ public:
     bool Reopen();
 
 private:
-    std::string filename_;
-    std::ofstream filestream_;
+    std::string filename_;      // 文件路径
+    std::ofstream filestream_;  // 文件流
+    uint64_t last_time_;        // 上次重打开时间(与当前时间戳比较)
+    bool reopen_error_{false};  // 文件打开错误标识
 };
 
 // ------------------- 继承自 LogFormatter::FormatItem -------------------

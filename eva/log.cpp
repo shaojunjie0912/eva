@@ -1,11 +1,16 @@
 #include "log.h"
 
+#include <cstdint>
+#include <iostream>
+
+#include "singleton.h"
+
 namespace eva {
 
 // ---------------- LogEvent 类 ----------------
 LogEvent::LogEvent(const std::string& logger_name, LogLevel::Level level, const char* file,
-                   int32_t line, int64_t elapse, uint32_t thread_id, uint64_t fiber_id, time_t time,
-                   const std::string& thread_name)
+                   int32_t line, int64_t elapse, uint32_t thread_id, uint64_t fiber_id,
+                   uint64_t time, const std::string& thread_name)
     : level_(level),
       file_(file),
       line_(line),
@@ -158,53 +163,143 @@ std::ostream& LogFormatter::Format(std::ostream& os, LogEvent::ptr event) {
     return os;
 }
 
+// ---------------- LogAppender 类 ----------------
+
+LogAppender::LogAppender(LogFormatter::ptr default_formatter)
+    : default_formatter_(default_formatter) {}
+
+// ---------------- StdoutLogAppender 类 ----------------
+
+// 基类 LogAppender 构造 -> 派生类 StdoutLogAppender 构造
+// 因为基类没有默认构造函数，必须显示构造
+// 用一个默认构造函数的 LogFormatter 智能指针构造一个 LogAppender 基类对象
+//  Constructor for 'eva::StdoutLogAppender' must explicitly initialize the base class 'LogAppender'
+//  which does not have a default constructor
+StdoutLogAppender::StdoutLogAppender() : LogAppender(LogFormatter::ptr{new LogFormatter}) {}
+
+void StdoutLogAppender::Log(LogEvent::ptr event) {
+    if (formatter_) {
+        formatter_->Format(std::cout, event);
+    } else {
+        default_formatter_->Format(std::cout, event);
+    }
+}
+
+// ---------------- FileLogAppender 类 ----------------
+
+FileLogAppender::FileLogAppender(std::string const& filename)
+    : LogAppender(LogFormatter::ptr{new LogFormatter}), filename_(filename) {
+    Reopen();  // 重新打开？
+    if (reopen_error_) {
+        std::cout << "reopen file " << filename_ << " error" << std::endl;
+    }
+}
+
+void FileLogAppender::Log(LogEvent::ptr event) {
+    uint64_t now = event->GetTime();
+    // 如果一个日志事件距离上次写日志超过3秒，那就重新打开一次日志文件
+    if (now >= last_time_ + 3) {
+        Reopen();
+        if (reopen_error_) {
+            std::cout << "reopen file " << filename_ << " error" << std::endl;
+        }
+        last_time_ = now;
+    }
+    if (reopen_error_) {
+        return;
+    }
+    // 这里的🔒不确定
+    std::lock_guard lk{mtx_};
+    if (formatter_) {
+        if (!formatter_->Format(filestream_, event)) {
+            std::cout << "[ERROR] FileLogAppender::log() format error" << std::endl;
+        } else {
+            if (!default_formatter_->Format(filestream_, event)) {
+                std::cout << "[ERROR] FileLogAppender::log() format error" << std::endl;
+            }
+        }
+    }
+}
+
+bool FileLogAppender::Reopen() {
+    std::lock_guard lk{mtx_};
+    if (filestream_) {
+        filestream_.close();
+    }
+    filestream_.open(filename_);
+    reopen_error_ = !filestream_;
+    return !reopen_error_;
+}
+
 // ---------------- Logger 类 ----------------
 
-void Logger::AddAppender(LogAppender::ptr appender) { appenders_.push_back(appender); }
+// TODO: 这里 create_time 后续再添加
+Logger::Logger(std::string const& name)
+    : name_(name), level_(LogLevel::Level::INFO), create_time_() {}
+
+void Logger::AddAppender(LogAppender::ptr appender) {
+    std::lock_guard lk{mtx_};  // NOTE: 加锁
+    appenders_.push_back(appender);
+}
 
 void Logger::DelAppender(LogAppender::ptr appender) {
+    std::lock_guard lk{mtx_};  // NOTE: 加锁
     if (auto it{std::find(appenders_.begin(), appenders_.end(), appender)};
         it != appenders_.end()) {
         appenders_.erase(it);
     }
 }
-void Logger::Log(LogLevel::Level level, LogEvent::ptr event) {
-    if (level >= level_) {
+
+void Logger::ClearAppenders() {
+    std::lock_guard lk{mtx_};  // NOTE: 加锁
+    appenders_.clear();
+}
+
+/**
+ * 调用Logger的所有appenders将日志写一遍，
+ * Logger至少要有一个appender，否则没有输出
+ */
+void Logger::Log(LogEvent::ptr event) {
+    if (event->GetLevel() >= level_) {
         for (auto const& appender : appenders_) {
-            appender->Log(level, event);
+            appender->Log(event);
         }
     }
 }
 
-void Logger::Debug(LogEvent::ptr event) { Log(LogLevel::Level::DEBUG, event); }
-void Logger::Info(LogEvent::ptr event) { Log(LogLevel::Level::INFO, event); }
-void Logger::Warn(LogEvent::ptr event) { Log(LogLevel::Level::WARN, event); }
-void Logger::Error(LogEvent::ptr event) { Log(LogLevel::Level::ERROR, event); }
-void Logger::Fatal(LogEvent::ptr event) { Log(LogLevel::Level::FATAL, event); }
+// ---------------- LogEventWrap 类 ----------------
 
-// ---------------- StdoutLogAppender 类 ----------------
-void StdoutLogAppender::Log(LogLevel::Level level, LogEvent::ptr event) {
-    if (level >= level_) {
-        std::cout << formatter_->Format(event);
-    }
+LogEventWrap::LogEventWrap(Logger::ptr logger, LogEvent::ptr event)
+    : logger_(logger), event_(event) {}
+
+// NOTE: LogEventWrap 在析构时写日志
+LogEventWrap::~LogEventWrap() { logger_->Log(event_); }
+
+// ---------------- LoggerManager 类 ----------------
+LoggerManager::LoggerManager() {
+    root_.reset(new Logger{"root"});
+    root_->AddAppender(LogAppender::ptr{new StdoutLogAppender});
+    loggers_[root_->GetName()] = root_;
+    Init();
 }
 
-// ---------------- FileLogAppender 类 ----------------
-void FileLogAppender::Log(LogLevel::Level level, LogEvent::ptr event) {
-    if (level >= level_) {
-        filestream_ << formatter_->Format(event);
+// TODO: 没写 LoggerManager::Init
+void LoggerManager::Init() {}
+
+/**
+ * 如果指定名称的日志器未找到，那会就新创建一个，但是新创建的Logger是不带Appender的，
+ * 需要手动添加Appender
+ */
+Logger::ptr LoggerManager::GetLogger(std::string const& name) {
+    std::lock_guard lk{mtx_};  // NOTE: 加锁
+    if (loggers_.count(name)) {
+        return loggers_[name];
     }
+    Logger::ptr logger{new Logger{name}};
+    loggers_[name] = logger;
+    return logger;
 }
 
-bool FileLogAppender::Reopen() {
-    if (filestream_) {
-        filestream_.close();
-    }
-    filestream_.open(filename_);
-    return !!filestream_;
-}
-
-LogAppender::LogAppender(LogFormatter::ptr default_formatter)
-    : default_formatter_(default_formatter) {}
+using LoggerMgr = Singleton<LoggerManager>;
 
 }  // namespace eva
