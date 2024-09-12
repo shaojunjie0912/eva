@@ -1,6 +1,0 @@
-target("eva", function()
-    set_kind("static")
-    set_encodings("source:utf-8")
-    add_files("*.cpp")
-    -- add_includedirs("include")
-end)

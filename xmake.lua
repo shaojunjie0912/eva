@@ -7,4 +7,10 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("toml++")
 
-includes("eva")
+target("eva", function()
+    set_kind("static")
+    set_encodings("source:utf-8")
+    add_files("src/*.cpp")
+    add_includedirs("include")
+    add_packages("toml++")
+end)

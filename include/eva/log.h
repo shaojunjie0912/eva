@@ -74,14 +74,14 @@ public:
 #define XX(name)                \
     case LogLevel::Level::name: \
         return #name;
-            XX(FATAL);
-            XX(ALERT);
-            XX(CRIT);
-            XX(ERROR);
-            XX(WARN);
-            XX(NOTICE);
-            XX(INFO);
-            XX(DEBUG);
+            XX(FATAL)
+            XX(ALERT)
+            XX(CRIT)
+            XX(ERROR)
+            XX(WARN)
+            XX(NOTICE)
+            XX(INFO)
+            XX(DEBUG)
 #undef XX
             default:
                 return "NOTSET";

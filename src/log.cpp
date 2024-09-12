@@ -1,9 +1,8 @@
-#include "log.h"
+#include <eva/log.h>
+#include <eva/singleton.h>
 
 #include <cstdint>
 #include <iostream>
-
-#include "singleton.h"
 
 namespace eva {
 
