@@ -1,0 +1,5 @@
+target("test_log", function()
+    set_kind("binary")
+    add_files("test_log.cpp")
+    add_deps("log")
+end)

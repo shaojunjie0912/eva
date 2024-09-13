@@ -1,7 +1,7 @@
-#include <eva/log.h>
-#include <eva/singleton.h>
+#include <log/log.h>
 
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 
 namespace eva {
@@ -19,6 +19,13 @@ LogEvent::LogEvent(const std::string& logger_name, LogLevel::Level level, const 
       time_(time),
       thread_name_(thread_name),
       logger_name_(logger_name) {}
+
+void LogEvent::Printf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+}
 
 // ---------------- LogFormatter 类 ----------------
 
@@ -186,6 +193,7 @@ void StdoutLogAppender::Log(LogEvent::ptr event) {
 
 // ---------------- FileLogAppender 类 ----------------
 
+// LogFormatter 空构造函数意味着 default_formatter
 FileLogAppender::FileLogAppender(std::string const& filename)
     : LogAppender(LogFormatter::ptr{new LogFormatter}), filename_(filename) {
     Reopen();  // 重新打开？
@@ -209,13 +217,17 @@ void FileLogAppender::Log(LogEvent::ptr event) {
     }
     // 这里的🔒不确定
     std::lock_guard lk{mtx_};
+
+    // 如果有自定义的 formatter
     if (formatter_) {
         if (!formatter_->Format(filestream_, event)) {
             std::cout << "[ERROR] FileLogAppender::log() format error" << std::endl;
-        } else {
-            if (!default_formatter_->Format(filestream_, event)) {
-                std::cout << "[ERROR] FileLogAppender::log() format error" << std::endl;
-            }
+        }
+    }
+    // 默认 default_formatter
+    else {
+        if (!default_formatter_->Format(filestream_, event)) {
+            std::cout << "[ERROR] FileLogAppender::log() format error" << std::endl;
         }
     }
 }
@@ -225,7 +237,7 @@ bool FileLogAppender::Reopen() {
     if (filestream_) {
         filestream_.close();
     }
-    filestream_.open(filename_);
+    filestream_.open(filename_, std::ios::app);
     reopen_error_ = !filestream_;
     return !reopen_error_;
 }
@@ -233,8 +245,9 @@ bool FileLogAppender::Reopen() {
 // ---------------- Logger 类 ----------------
 
 // TODO: 这里 create_time 后续再添加
+// 日志器的默认等级 INFO
 Logger::Logger(std::string const& name)
-    : name_(name), level_(LogLevel::Level::INFO), create_time_() {}
+    : name_(name), level_(LogLevel::Level::INFO), create_time_(GetElapsedMS()) {}
 
 void Logger::AddAppender(LogAppender::ptr appender) {
     std::lock_guard lk{mtx_};  // NOTE: 加锁
@@ -276,7 +289,9 @@ LogEventWrap::~LogEventWrap() { logger_->Log(event_); }
 
 // ---------------- LoggerManager 类 ----------------
 LoggerManager::LoggerManager() {
+    // 默认创建一个 root 日志器
     root_.reset(new Logger{"root"});
+    // 为默认日志器创建一个 StdoutLogAppender
     root_->AddAppender(LogAppender::ptr{new StdoutLogAppender});
     loggers_[root_->GetName()] = root_;
     Init();
@@ -298,7 +313,5 @@ Logger::ptr LoggerManager::GetLogger(std::string const& name) {
     loggers_[name] = logger;
     return logger;
 }
-
-using LoggerMgr = Singleton<LoggerManager>;
 
 }  // namespace eva

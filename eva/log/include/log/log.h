@@ -1,6 +1,10 @@
 #pragma once
 
+#include <common/singleton.h>
+#include <util/util.h>
+
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <ctime>
 #include <fstream>
@@ -22,18 +26,28 @@
 // 貌似很多函数都删除了这个 level 形参
 
 /**
+ * @brief 获取root日志器
+ */
+#define EVA_LOG_ROOT() eva::LoggerMgr::GetInstance()->GetRoot()
+
+/**
+ * @brief 获取指定名称的日志器
+ */
+#define EVA_LOG_NAME(name) eva::LoggerMgr::GetInstance()->GetLogger(name)
+
+/**
  * @brief 使用流式方式将日志级别level的日志写入到logger
  * @details 构造一个LogEventWrap对象，包裹包含日志器和日志事件，在对象析构时调用日志器写日志事件
  * TODO: 协程id未实现，暂时写0
  */
-#define EVA_LOG_LEVEL(logger, level)                                                         \
-    if (logger->GetLevel() >= level)                                                         \
-    eva::LogEventWrap{logger,                                                                \
-                      eva::LogEvent::ptr{new eva::LogEvent{                                  \
-                          logger->GetName(), level, __FILE__, __LINE__,                      \
-                          eva::GetElapsedMS() - logger->GetCreateTime(), eva::GetThreadId(), \
-                          eva::GetFiberId(), time(0), eva::GetThreadName()}}}                \
-        .GetLogEvent()                                                                       \
+#define EVA_LOG_LEVEL(logger, level)                                                            \
+    if (level >= logger->GetLevel())                                                            \
+    eva::LogEventWrap{                                                                          \
+        logger, std::make_shared<eva::LogEvent>(logger->GetName(), level, __FILE__, __LINE__,   \
+                                                eva::GetElapsedMS() - logger->GetCreateTime(),  \
+                                                eva::GetThreadId(), eva::GetFiberId(), time(0), \
+                                                eva::GetThreadName())}                          \
+        .GetLogEvent()                                                                          \
         ->GetSs()
 
 #define EVA_LOG_FATAL(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::FATAL)
@@ -52,21 +66,61 @@
 
 #define EVA_LOG_DEBUG(logger) EVA_LOG_LEVEL(logger, eva::LogLevel::Level::DEBUG)
 
+/**
+ * @brief 使用C printf方式将日志级别level的日志写入到logger
+ * @details 构造一个LogEventWrap对象，包裹包含日志器和日志事件，在对象析构时调用日志器写日志事件
+ * @todo 协程id未实现，暂时写0
+ */
+#define EVA_LOG_FMT_LEVEL(logger, level, fmt, ...)                                                 \
+    if (level >= logger->GetLevel()) {                                                             \
+        eva::LogEventWrap{                                                                         \
+            logger, std::make_shared<eva::LogEvent>(logger->GetName(), level, __FILE__, __LINE__,  \
+                                                    eva::GetElapsedMS() - logger->GetCreateTime(), \
+                                                    eva::GetThreadId(), eva::GetFiberId(),         \
+                                                    time(0), eva::GetThreadName())}                \
+            .GetLogEvent()                                                                         \
+            ->Printf(fmt __VA_OPT__(, ) __VA_ARGS__);                                              \
+    }
+
+#define EVA_LOG_FMT_FATAL(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::FATAL, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_ALERT(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::ALERT, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_CRIT(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::CRIT, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_ERROR(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::ERROR, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_WARN(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::WARN, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_NOTICE(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::NOTICE, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_INFO(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::INFO, fmt __VA_OPT__(, ) __VA_ARGS__)
+
+#define EVA_LOG_FMT_DEBUG(logger, fmt, ...) \
+    EVA_LOG_FMT_LEVEL(logger, eva::LogLevel::Level::DEBUG, fmt __VA_OPT__(, ) __VA_ARGS__)
+
 namespace eva {
 
 // 日志级别
 class LogLevel {
 public:
     enum class Level {
-        FATAL = 0,     // 致命情况，系统不可用
-        ALERT = 100,   // 高优先级情况，例如数据库系统崩溃
-        CRIT = 200,    // 严重错误，例如硬盘错误
-        ERROR = 300,   // 错误
+        NOTSET = 0,    // 未设置
+        DEBUG = 100,   // 调试信息
+        INFO = 200,    // 一般信息
+        NOTICE = 300,  // 正常但值得注意
         WARN = 400,    // 警告
-        NOTICE = 500,  // 正常但值得注意
-        INFO = 600,    // 一般信息
-        DEBUG = 700,   // 调试信息
-        NOTSET = 800   // 未设置
+        ERROR = 500,   // 错误
+        CRIT = 600,    // 严重错误，例如硬盘错误
+        ALERT = 700,   // 高优先级情况，例如数据库系统崩溃
+        FATAL = 800    // 致命情况，系统不可用
     };
 
     static std::string ToString(LogLevel::Level const& level) {
@@ -121,9 +175,32 @@ public:
     using ptr = std::shared_ptr<LogEvent>;
 
 public:
+    /**
+     * @brief 构造函数
+     * @param[in] logger_name 日志器名称
+     * @param[in] level 日志级别
+     * @param[in] file 文件名
+     * @param[in] line 行号
+     * @param[in] elapse 从日志器创建开始到当前的累计运行毫秒
+     * @param[in] thead_id 线程id
+     * @param[in] fiber_id 协程id
+     * @param[in] time UTC时间
+     * @param[in] thread_name 线程名称
+     */
     LogEvent(const std::string& logger_name, LogLevel::Level level, const char* file, int32_t line,
              int64_t elapse, uint32_t thread_id, uint64_t fiber_id, uint64_t time,
              const std::string& thread_name);
+
+public:
+    /**
+     * @brief C prinf风格写入日志
+     */
+    void Printf(const char* fmt, ...);
+
+    /**
+     * @brief C vprintf风格写入日志
+     */
+    // void vprintf(const char* fmt, va_list ap);
 
 public:
     // Get 方法
@@ -175,8 +252,8 @@ public:
      * - %%m 消息
      * - %%p 日志级别
      * - %%c 日志器名称
-     * - %%d 日期时间，后面可跟一对括号指定时间格式，比如%%d{%%Y-%%m-%%d
-     * %%H:%%M:%%S}，这里的格式字符与C语言strftime一致
+     * - %%d 日期时间，后面可跟一对括号指定时间格式，
+         比如%%d{%%Y-%%m-%%d%%H:%%M:%%S}，这里的格式字符与C语言strftime一致
      * - %%r 该日志器创建后的累计运行毫秒数
      * - %%f 文件名
      * - %%l 行号
@@ -333,7 +410,7 @@ public:
 
     /**
      * @brief 析构函数
-     * @details 日志事件在析构时由日志器进行输出
+     * @details NOTE: 日志事件在析构时由日志器进行输出
      */
     ~LogEventWrap();
 
@@ -345,6 +422,9 @@ private:
     LogEvent::ptr event_;  // 日志事件
 };
 
+/**
+ * @brief 日志器管理类
+ */
 class LoggerManager {
 public:
     LoggerManager();
@@ -357,8 +437,10 @@ public:
 private:
     std::mutex mtx_;
     std::map<std::string, Logger::ptr> loggers_;  // 日志器集合
-    Logger::ptr root_;                            // root 日志器
+    Logger::ptr root_;                            // 默认 root 日志器
 };
+
+using LoggerMgr = Singleton<LoggerManager>;
 
 // ------------------- 继承自 LogAppender -------------------
 

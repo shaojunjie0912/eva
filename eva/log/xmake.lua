@@ -1,0 +1,8 @@
+target("log", function()
+    set_kind("static")
+    set_encodings("source:utf-8")
+    add_files("src/*.cpp")
+    add_includedirs("include", { public = true })
+    add_deps("util")
+    add_deps("fiber")
+end)
